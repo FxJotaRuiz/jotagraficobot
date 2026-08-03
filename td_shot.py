@@ -59,9 +59,15 @@ def parse_destinos(raw):
         if len(parts) != 4:
             log(f"  destino mal formado (ignorado): {chunk!r}")
             continue
-        chat_id, cuando, valor, tf = parts
-        dest.append({"chat_id": chat_id, "cuando": cuando.lower(),
-                     "valor": valor, "tf": tf, "last": None})
+        chat_part, cuando, valor, tf = parts
+        # chat_part puede ser "chat_id" o "chat_id/tema" (tema = message_thread_id)
+        if "/" in chat_part:
+            chat_id, thread = chat_part.split("/", 1)
+            thread = thread.strip()
+        else:
+            chat_id, thread = chat_part, None
+        dest.append({"chat_id": chat_id.strip(), "thread": thread,
+                     "cuando": cuando.lower(), "valor": valor, "tf": tf, "last": None})
     return dest
 
 
@@ -81,10 +87,12 @@ def is_due(d, now):
     return False
 
 
-def send_photo(chat_id, path, caption):
+def send_photo(chat_id, path, caption, thread=None):
+    data = {"chat_id": chat_id, "caption": caption[:1024]}
+    if thread:
+        data["message_thread_id"] = thread
     with open(path, "rb") as f:
-        r = requests.post(f"{API}/sendPhoto", timeout=60,
-                          data={"chat_id": chat_id, "caption": caption[:1024]},
+        r = requests.post(f"{API}/sendPhoto", timeout=60, data=data,
                           files={"photo": f})
     r.raise_for_status()
 
@@ -163,7 +171,8 @@ def main():
 
     log(f"Arrancando. TZ={TZ_NAME}. Destinos:")
     for d in destinos:
-        log(f"  {d['chat_id']} | {d['cuando']} {d['valor']} | {d['tf']}")
+        tema = f" (tema {d['thread']})" if d.get('thread') else ""
+        log(f"  {d['chat_id']}{tema} | {d['cuando']} {d['valor']} | {d['tf']}")
 
     os.makedirs(PROFILE_DIR, exist_ok=True)
     with sync_playwright() as p:
@@ -189,7 +198,7 @@ def main():
                         login(page)
                     caption = f"BTC/USDT · {d['tf']} · Liquidaciones (Trading Different)"
                     path = capture(page, d["tf"])
-                    send_photo(d["chat_id"], path, caption)
+                    send_photo(d["chat_id"], path, caption, d.get("thread"))
                     d["last"] = now
                     log(f"  -> Enviado a {d['chat_id']} ({d['tf']}) OK")
                 except Exception as e:
