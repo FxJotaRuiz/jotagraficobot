@@ -149,7 +149,7 @@ def compress_price(page):
         for _ in range(PRICE_COMPRESS):
             page.mouse.move(x, y)
             page.mouse.down()
-            page.mouse.move(x, y - 120, steps=8)   # arrastrar hacia arriba = comprimir
+            page.mouse.move(x, y + 120, steps=8)   # arrastrar hacia ABAJO = comprimir (ver más rango)
             page.mouse.up()
             page.wait_for_timeout(300)
         page.wait_for_timeout(1500)
