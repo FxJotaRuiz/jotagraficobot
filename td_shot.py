@@ -39,10 +39,21 @@ VP_HEIGHT    = int(os.environ.get("VP_HEIGHT", "760"))
 # Compresión del eje de PRECIO: arrastra la escala de la derecha para ver más rango arriba/abajo.
 # Nº de "pasos" de arrastre (más = más rango de precio). 0 = no comprime.
 PRICE_COMPRESS = int(os.environ.get("PRICE_COMPRESS", "6"))
+# --- Comando /mapa bajo demanda ---
+MAPA_ENABLE     = os.environ.get("MAPA_ENABLE", "1") == "1"
+MAPA_COMMAND    = os.environ.get("MAPA_COMMAND", "/mapa").strip()
+MAPA_CHAT       = os.environ.get("MAPA_CHAT", "").strip()        # id del grupo donde escucha (VIP)
+MAPA_TF         = os.environ.get("MAPA_TF", "15m").strip()
+MAPA_COOLDOWN_MIN = float(os.environ.get("MAPA_COOLDOWN_MIN", "10")) # minutos entre generaciones NUEVAS
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PROFILE_DIR = "/tmp/td-profile"
 TZ = ZoneInfo(TZ_NAME) if ZoneInfo else None
+
+# estado del comando /mapa
+mapa_last_gen = None   # datetime de la última imagen generada
+mapa_file_id  = None   # file_id de Telegram para reenviar sin regenerar
+tg_offset     = None   # offset de getUpdates
 
 
 def log(*a):
@@ -100,6 +111,69 @@ def send_photo(chat_id, path, caption, thread=None):
         r = requests.post(f"{API}/sendPhoto", timeout=60, data=data,
                           files={"photo": f})
     r.raise_for_status()
+    try:
+        return r.json()["result"]["photo"][-1]["file_id"]
+    except Exception:
+        return None
+
+
+def send_cached(chat_id, file_id, caption, thread=None):
+    data = {"chat_id": chat_id, "caption": caption[:1024], "photo": file_id}
+    if thread:
+        data["message_thread_id"] = thread
+    requests.post(f"{API}/sendPhoto", timeout=30, data=data).raise_for_status()
+
+
+def tg_get_updates(offset):
+    params = {"timeout": 0}
+    if offset is not None:
+        params["offset"] = offset
+    r = requests.get(f"{API}/getUpdates", params=params, timeout=20)
+    r.raise_for_status()
+    return r.json().get("result", [])
+
+
+def handle_commands(page):
+    """Escucha /mapa en el grupo MAPA_CHAT y responde con el mapa (cache o nuevo)."""
+    global tg_offset, mapa_last_gen, mapa_file_id
+    if not (MAPA_ENABLE and MAPA_CHAT):
+        return
+    try:
+        updates = tg_get_updates(tg_offset)
+    except Exception as e:
+        log("  aviso getUpdates:", e)
+        return
+    for u in updates:
+        tg_offset = u["update_id"] + 1
+        msg = u.get("message")
+        if not msg:
+            continue
+        if str(msg.get("chat", {}).get("id")) != str(MAPA_CHAT):
+            continue
+        text = (msg.get("text") or "").strip()
+        cmd = text.split()[0].split("@")[0] if text else ""
+        if cmd != MAPA_COMMAND:
+            continue
+        thread = msg.get("message_thread_id")   # responder en el mismo tema
+        cap = f"BTC/USDT · {MAPA_TF} · Liquidaciones (Trading Different)"
+        now = now_local()
+        try:
+            fresco = (mapa_file_id and mapa_last_gen and
+                      (now - mapa_last_gen).total_seconds() < MAPA_COOLDOWN_MIN * 60)
+            if fresco:
+                send_cached(MAPA_CHAT, mapa_file_id, cap, thread)
+                log("  /mapa -> imagen en caché")
+            else:
+                if not is_logged_in(page):
+                    login(page)
+                path = capture(page, MAPA_TF)
+                fid = send_photo(MAPA_CHAT, path, cap, thread)
+                if fid:
+                    mapa_file_id = fid
+                    mapa_last_gen = now
+                log("  /mapa -> imagen nueva generada")
+        except Exception as e:
+            log("  X error atendiendo /mapa:", e)
 
 
 def is_logged_in(page):
@@ -216,8 +290,19 @@ def main():
             log("✗ error en el login inicial:", e)
             dump_debug(page, destinos[0]["chat_id"], "fallo login inicial")
 
+        # baseline de comandos: ignora /mapa anteriores al arranque
+        if MAPA_ENABLE and MAPA_CHAT:
+            try:
+                ups = tg_get_updates(None)
+                if ups:
+                    tg_offset = ups[-1]["update_id"] + 1
+                log(f"Comando {MAPA_COMMAND} activo en {MAPA_CHAT} (cooldown {MAPA_COOLDOWN_MIN} min)")
+            except Exception as e:
+                log("  aviso baseline getUpdates:", e)
+
         while True:
             now = now_local()
+            handle_commands(page)
             for d in destinos:
                 if not is_due(d, now):
                     continue
