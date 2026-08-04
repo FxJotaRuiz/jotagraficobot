@@ -75,10 +75,12 @@ def is_due(d, now):
     if d["cuando"] == "daily":
         hh, mm = d["valor"].split(":")
         target = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-        if abs((now - target).total_seconds()) <= 90:
-            if d["last"] is None or d["last"].date() != now.date():
-                return True
-        return False
+        # ¿ya se envió hoy?
+        if d["last"] is not None and d["last"].date() == now.date():
+            return False
+        # dispara desde la hora objetivo y hasta 6h después (tolerante a reinicios/ocupación)
+        delta = (now - target).total_seconds()
+        return 0 <= delta <= 6 * 3600
     elif d["cuando"] == "every":
         n = float(d["valor"])
         if d["last"] is None:
