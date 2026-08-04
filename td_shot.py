@@ -133,9 +133,16 @@ def tg_get_updates(offset):
     return r.json().get("result", [])
 
 
+RESTART_NEEDED = False
+
+def _is_crash(e):
+    s = str(e).lower()
+    return any(k in s for k in ("crash", "target closed", "target crashed"))
+
+
 def handle_commands(page):
     """Escucha /mapa en el grupo MAPA_CHAT y responde con el mapa (cache o nuevo)."""
-    global tg_offset, mapa_last_gen, mapa_file_id
+    global tg_offset, mapa_last_gen, mapa_file_id, RESTART_NEEDED
     if not (MAPA_ENABLE and MAPA_CHAT):
         return
     try:
@@ -173,7 +180,10 @@ def handle_commands(page):
                     mapa_last_gen = now
                 log("  /mapa -> imagen nueva generada")
         except Exception as e:
+            global RESTART_NEEDED
             log("  X error atendiendo /mapa:", e)
+            if _is_crash(e):
+                RESTART_NEEDED = True
 
 
 def is_logged_in(page):
@@ -277,20 +287,29 @@ def main():
         log(f"  {d['chat_id']}{tema} | {d['cuando']} {d['valor']} | {d['tf']}")
 
     os.makedirs(PROFILE_DIR, exist_ok=True)
-    with sync_playwright() as p:
+
+    CHROME_ARGS = ["--no-sandbox", "--disable-dev-shm-usage",
+                   "--disable-gpu", "--single-process",
+                   "--disable-extensions", "--disable-background-networking",
+                   "--js-flags=--max-old-space-size=256"]
+
+    def make_ctx(p):
         ctx = p.chromium.launch_persistent_context(
             PROFILE_DIR, headless=HEADLESS, accept_downloads=True,
-            viewport={"width": VP_WIDTH, "height": VP_HEIGHT},
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            viewport={"width": VP_WIDTH, "height": VP_HEIGHT}, args=CHROME_ARGS,
         )
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        return ctx, page
+
+    global RESTART_NEEDED
+    with sync_playwright() as p:
+        ctx, page = make_ctx(p)
         try:
             login(page)
         except Exception as e:
-            log("✗ error en el login inicial:", e)
+            log("X error en el login inicial:", e)
             dump_debug(page, destinos[0]["chat_id"], "fallo login inicial")
 
-        # baseline de comandos: ignora /mapa anteriores al arranque
         if MAPA_ENABLE and MAPA_CHAT:
             try:
                 ups = tg_get_updates(None)
@@ -302,21 +321,54 @@ def main():
 
         while True:
             now = now_local()
+
+            # reinicio del navegador si un crash lo dejó tocado
+            if RESTART_NEEDED:
+                log("  reiniciando el navegador tras un crash...")
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+                try:
+                    ctx, page = make_ctx(p)
+                    login(page)
+                    log("  navegador reiniciado OK")
+                except Exception as e:
+                    log("  X no pude reiniciar el navegador:", e)
+                RESTART_NEEDED = False
+
             handle_commands(page)
+
             for d in destinos:
                 if not is_due(d, now):
                     continue
+                caption = f"BTC/USDT · {d['tf']} · Liquidaciones (Trading Different)"
                 try:
                     if not is_logged_in(page):
                         login(page)
-                    caption = f"BTC/USDT · {d['tf']} · Liquidaciones (Trading Different)"
                     path = capture(page, d["tf"])
                     send_photo(d["chat_id"], path, caption, d.get("thread"))
                     d["last"] = now
                     log(f"  -> Enviado a {d['chat_id']} ({d['tf']}) OK")
                 except Exception as e:
                     log(f"X error enviando a {d['chat_id']}:", e)
-                    dump_debug(page, d["chat_id"], str(e))
+                    if _is_crash(e):
+                        # reinicia y reintenta una vez para no perder el envío
+                        try:
+                            try:
+                                ctx.close()
+                            except Exception:
+                                pass
+                            ctx, page = make_ctx(p)
+                            login(page)
+                            path = capture(page, d["tf"])
+                            send_photo(d["chat_id"], path, caption, d.get("thread"))
+                            d["last"] = now
+                            log(f"  -> Enviado a {d['chat_id']} ({d['tf']}) OK (tras reinicio)")
+                        except Exception as e2:
+                            log("  X sigue fallando tras reinicio:", e2)
+                    else:
+                        dump_debug(page, d["chat_id"], str(e))
             time.sleep(30)
 
 
