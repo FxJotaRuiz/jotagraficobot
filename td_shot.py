@@ -36,6 +36,8 @@ SEL_TF_OPEN  = os.environ.get("SEL_TF_OPEN", "").strip()
 # Tamaño de la ventana de captura. Más ANCHO y menos ALTO = gráfico más "achatado" con más histórico.
 VP_WIDTH     = int(os.environ.get("VP_WIDTH", "2200"))
 VP_HEIGHT    = int(os.environ.get("VP_HEIGHT", "760"))
+# Nº de veces que aleja el zoom antes de capturar (más = más histórico/velas). 0 = no aleja.
+ZOOM_OUT     = int(os.environ.get("ZOOM_OUT", "8"))
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PROFILE_DIR = "/tmp/td-profile"
@@ -133,11 +135,36 @@ def set_timeframe(page, tf):
         log(f"  aviso: no pude cambiar a {tf} ({e}); capturo la actual")
 
 
+def zoom_out(page):
+    """Aleja el gráfico para que entren más velas (más histórico). Usa el atajo de TradingView."""
+    if ZOOM_OUT <= 0:
+        return
+    try:
+        # el gráfico de TradingView responde a la tecla '-' para alejar (zoom out)
+        chart = page.locator("iframe").first
+        try:
+            chart.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
+        # click en el centro del gráfico para darle foco, luego pulsar '-' varias veces
+        box = page.viewport_size
+        page.mouse.click(box["width"] * 0.5, box["height"] * 0.5)
+        page.wait_for_timeout(500)
+        for _ in range(ZOOM_OUT):
+            page.keyboard.press("Minus")
+            page.wait_for_timeout(180)
+        page.wait_for_timeout(1500)
+        log(f"  zoom out x{ZOOM_OUT}")
+    except Exception as e:
+        log(f"  aviso: no pude hacer zoom out ({e})")
+
+
 def capture(page, tf):
     log("Abriendo el gráfico…")
     page.goto(TD_CHART_URL, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(12000)
     set_timeframe(page, tf)
+    zoom_out(page)
     cam = page.locator(SEL_CAMERA).first
     cam.wait_for(state="visible", timeout=20000)
     log("Pulsando la cámara…")
