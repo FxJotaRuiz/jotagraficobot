@@ -45,15 +45,21 @@ MAPA_COMMAND    = os.environ.get("MAPA_COMMAND", "/mapa").strip()
 MAPA_CHAT       = os.environ.get("MAPA_CHAT", "").strip()        # id del grupo donde escucha (VIP)
 MAPA_TF         = os.environ.get("MAPA_TF", "15m").strip()
 MAPA_COOLDOWN_MIN = float(os.environ.get("MAPA_COOLDOWN_MIN", "10")) # minutos entre generaciones NUEVAS
+# Pares permitidos en /mapa (lista blanca): símbolo -> URL de Trading Different.
+# Para añadir pares en el futuro, amplía este dict.
+MAPA_PARES = {
+    "btc": "https://tradingdifferent.com/pools/binance-btcusdt",
+    "eth": "https://tradingdifferent.com/pools/binance-ethusdt",
+}
+MAPA_PAR_DEFECTO = "btc"
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PROFILE_DIR = "/tmp/td-profile"
 TZ = ZoneInfo(TZ_NAME) if ZoneInfo else None
 
-# estado del comando /mapa
-mapa_last_gen = None   # datetime de la última imagen generada
-mapa_file_id  = None   # file_id de Telegram para reenviar sin regenerar
-tg_offset     = None   # offset de getUpdates
+# estado del comando /mapa: caché por par -> {"btc": {"last": dt, "file_id": str}, ...}
+mapa_cache = {}
+tg_offset  = None   # offset de getUpdates
 
 
 def log(*a):
@@ -124,6 +130,16 @@ def send_cached(chat_id, file_id, caption, thread=None):
     requests.post(f"{API}/sendPhoto", timeout=30, data=data).raise_for_status()
 
 
+def send_text_to(chat_id, text, thread=None):
+    data = {"chat_id": chat_id, "text": text[:4096]}
+    if thread:
+        data["message_thread_id"] = thread
+    try:
+        requests.post(f"{API}/sendMessage", timeout=20, data=data)
+    except Exception:
+        pass
+
+
 def tg_get_updates(offset):
     params = {"timeout": 0}
     if offset is not None:
@@ -142,7 +158,7 @@ def _is_crash(e):
 
 def handle_commands(page):
     """Escucha /mapa en el grupo MAPA_CHAT y responde con el mapa (cache o nuevo)."""
-    global tg_offset, mapa_last_gen, mapa_file_id, RESTART_NEEDED
+    global tg_offset, mapa_cache, RESTART_NEEDED
     if not (MAPA_ENABLE and MAPA_CHAT):
         return
     try:
@@ -158,30 +174,37 @@ def handle_commands(page):
         if str(msg.get("chat", {}).get("id")) != str(MAPA_CHAT):
             continue
         text = (msg.get("text") or "").strip()
-        cmd = text.split()[0].split("@")[0] if text else ""
+        parts = text.split()
+        cmd = parts[0].split("@")[0] if parts else ""
         if cmd != MAPA_COMMAND:
             continue
         thread = msg.get("message_thread_id")   # responder en el mismo tema
-        cap = f"BTC/USDT · {MAPA_TF} · Liquidaciones (Trading Different)"
+        # par pedido (ej. "/mapa eth"); si no ponen nada -> por defecto
+        par = parts[1].lower() if len(parts) > 1 else MAPA_PAR_DEFECTO
+        if par not in MAPA_PARES:
+            disponibles = ", ".join(MAPA_PARES.keys())
+            send_text_to(MAPA_CHAT, f"No tengo el par \"{par}\". Disponibles: {disponibles}", thread)
+            log(f"  /mapa {par} -> par no permitido")
+            continue
+        url = MAPA_PARES[par]
+        cap = f"{par.upper()}/USDT · {MAPA_TF} · Liquidaciones (Trading Different)"
         now = now_local()
+        c = mapa_cache.get(par)
         try:
-            fresco = (mapa_file_id and mapa_last_gen and
-                      (now - mapa_last_gen).total_seconds() < MAPA_COOLDOWN_MIN * 60)
+            fresco = c and c["file_id"] and (now - c["last"]).total_seconds() < MAPA_COOLDOWN_MIN * 60
             if fresco:
-                send_cached(MAPA_CHAT, mapa_file_id, cap, thread)
-                log("  /mapa -> imagen en caché")
+                send_cached(MAPA_CHAT, c["file_id"], cap, thread)
+                log(f"  /mapa {par} -> imagen en caché")
             else:
                 if not is_logged_in(page):
                     login(page)
-                path = capture(page, MAPA_TF)
+                path = capture(page, MAPA_TF, url)
                 fid = send_photo(MAPA_CHAT, path, cap, thread)
                 if fid:
-                    mapa_file_id = fid
-                    mapa_last_gen = now
-                log("  /mapa -> imagen nueva generada")
+                    mapa_cache[par] = {"last": now, "file_id": fid}
+                log(f"  /mapa {par} -> imagen nueva generada")
         except Exception as e:
-            global RESTART_NEEDED
-            log("  X error atendiendo /mapa:", e)
+            log(f"  X error atendiendo /mapa {par}:", e)
             if _is_crash(e):
                 RESTART_NEEDED = True
 
@@ -242,9 +265,9 @@ def compress_price(page):
         log(f"  aviso: no pude comprimir el eje de precio ({e})")
 
 
-def capture(page, tf):
+def capture(page, tf, url=None):
     log("Abriendo el gráfico…")
-    page.goto(TD_CHART_URL, wait_until="domcontentloaded", timeout=60000)
+    page.goto(url or TD_CHART_URL, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(12000)
     set_timeframe(page, tf)
     compress_price(page)
