@@ -36,8 +36,9 @@ SEL_TF_OPEN  = os.environ.get("SEL_TF_OPEN", "").strip()
 # Tamaño de la ventana de captura. Más ANCHO y menos ALTO = gráfico más "achatado" con más histórico.
 VP_WIDTH     = int(os.environ.get("VP_WIDTH", "2200"))
 VP_HEIGHT    = int(os.environ.get("VP_HEIGHT", "760"))
-# Nº de veces que aleja el zoom antes de capturar (más = más histórico/velas). 0 = no aleja.
-ZOOM_OUT     = int(os.environ.get("ZOOM_OUT", "8"))
+# Compresión del eje de PRECIO: arrastra la escala de la derecha para ver más rango arriba/abajo.
+# Nº de "pasos" de arrastre (más = más rango de precio). 0 = no comprime.
+PRICE_COMPRESS = int(os.environ.get("PRICE_COMPRESS", "6"))
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 PROFILE_DIR = "/tmp/td-profile"
@@ -135,28 +136,26 @@ def set_timeframe(page, tf):
         log(f"  aviso: no pude cambiar a {tf} ({e}); capturo la actual")
 
 
-def zoom_out(page):
-    """Aleja el gráfico para que entren más velas (más histórico). Usa el atajo de TradingView."""
-    if ZOOM_OUT <= 0:
+def compress_price(page):
+    """Comprime el eje de PRECIO arrastrando la escala de la derecha hacia arriba.
+    Así se ve más rango de precio (más zonas de liquidación arriba y abajo)."""
+    if PRICE_COMPRESS <= 0:
         return
     try:
-        # el gráfico de TradingView responde a la tecla '-' para alejar (zoom out)
-        chart = page.locator("iframe").first
-        try:
-            chart.scroll_into_view_if_needed(timeout=3000)
-        except Exception:
-            pass
-        # click en el centro del gráfico para darle foco, luego pulsar '-' varias veces
         box = page.viewport_size
-        page.mouse.click(box["width"] * 0.5, box["height"] * 0.5)
-        page.wait_for_timeout(500)
-        for _ in range(ZOOM_OUT):
-            page.keyboard.press("Minus")
-            page.wait_for_timeout(180)
+        # el eje de precios está en el borde derecho; agarramos ahí, a media altura
+        x = box["width"] - 25          # muy pegado al borde derecho (escala de precios)
+        y = box["height"] * 0.5
+        for _ in range(PRICE_COMPRESS):
+            page.mouse.move(x, y)
+            page.mouse.down()
+            page.mouse.move(x, y - 120, steps=8)   # arrastrar hacia arriba = comprimir
+            page.mouse.up()
+            page.wait_for_timeout(300)
         page.wait_for_timeout(1500)
-        log(f"  zoom out x{ZOOM_OUT}")
+        log(f"  compresión de precio x{PRICE_COMPRESS}")
     except Exception as e:
-        log(f"  aviso: no pude hacer zoom out ({e})")
+        log(f"  aviso: no pude comprimir el eje de precio ({e})")
 
 
 def capture(page, tf):
@@ -164,7 +163,7 @@ def capture(page, tf):
     page.goto(TD_CHART_URL, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(12000)
     set_timeframe(page, tf)
-    zoom_out(page)
+    compress_price(page)
     cam = page.locator(SEL_CAMERA).first
     cam.wait_for(state="visible", timeout=20000)
     log("Pulsando la cámara…")
