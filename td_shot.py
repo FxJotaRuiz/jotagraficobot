@@ -153,7 +153,9 @@ RESTART_NEEDED = False
 
 def _is_crash(e):
     s = str(e).lower()
-    return any(k in s for k in ("crash", "target closed", "target crashed"))
+    return any(k in s for k in ("crash", "target closed", "target crashed",
+                                "has been closed", "browser has been closed",
+                                "connection closed"))
 
 
 def handle_commands(page):
@@ -312,11 +314,19 @@ def main():
     os.makedirs(PROFILE_DIR, exist_ok=True)
 
     CHROME_ARGS = ["--no-sandbox", "--disable-dev-shm-usage",
-                   "--disable-gpu", "--single-process",
-                   "--disable-extensions", "--disable-background-networking",
-                   "--js-flags=--max-old-space-size=256"]
+                   "--disable-gpu", "--disable-extensions",
+                   "--disable-background-networking"]
+
+    def _clear_lock():
+        # si Chromium se cerró mal, deja el perfil bloqueado y no reabre; limpiamos
+        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            try:
+                os.remove(os.path.join(PROFILE_DIR, name))
+            except Exception:
+                pass
 
     def make_ctx(p):
+        _clear_lock()
         ctx = p.chromium.launch_persistent_context(
             PROFILE_DIR, headless=HEADLESS, accept_downloads=True,
             viewport={"width": VP_WIDTH, "height": VP_HEIGHT}, args=CHROME_ARGS,
@@ -342,6 +352,9 @@ def main():
             except Exception as e:
                 log("  aviso baseline getUpdates:", e)
 
+        fail_streak = 0
+        MAX_FAILS = 6   # tras tantos fallos seguidos, salir para que Railway reinicie limpio
+
         while True:
             now = now_local()
 
@@ -356,9 +369,15 @@ def main():
                     ctx, page = make_ctx(p)
                     login(page)
                     log("  navegador reiniciado OK")
+                    fail_streak = 0
                 except Exception as e:
                     log("  X no pude reiniciar el navegador:", e)
+                    fail_streak += 1
                 RESTART_NEEDED = False
+
+            if fail_streak >= MAX_FAILS:
+                log(f"  {fail_streak} fallos seguidos: salgo para que Railway reinicie el contenedor limpio.")
+                raise SystemExit(1)
 
             handle_commands(page)
 
@@ -372,6 +391,7 @@ def main():
                     path = capture(page, d["tf"])
                     send_photo(d["chat_id"], path, caption, d.get("thread"))
                     d["last"] = now
+                    fail_streak = 0
                     log(f"  -> Enviado a {d['chat_id']} ({d['tf']}) OK")
                 except Exception as e:
                     log(f"X error enviando a {d['chat_id']}:", e)
@@ -387,8 +407,10 @@ def main():
                             path = capture(page, d["tf"])
                             send_photo(d["chat_id"], path, caption, d.get("thread"))
                             d["last"] = now
+                            fail_streak = 0
                             log(f"  -> Enviado a {d['chat_id']} ({d['tf']}) OK (tras reinicio)")
                         except Exception as e2:
+                            fail_streak += 1
                             log("  X sigue fallando tras reinicio:", e2)
                     else:
                         dump_debug(page, d["chat_id"], str(e))
