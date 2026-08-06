@@ -50,6 +50,7 @@ MAPA_COOLDOWN_MIN = float(os.environ.get("MAPA_COOLDOWN_MIN", "10")) # minutos e
 MAPA_PARES = {
     "btc": "https://tradingdifferent.com/pools/binance-btcusdt",
     "eth": "https://tradingdifferent.com/pools/binance-ethusdt",
+    "sol": "https://tradingdifferent.com/pools/binance-solusdt",
 }
 MAPA_PAR_DEFECTO = "btc"
 
