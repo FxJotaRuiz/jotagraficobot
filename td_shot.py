@@ -77,18 +77,21 @@ def parse_destinos(raw):
         if not chunk:
             continue
         parts = [p.strip() for p in chunk.split("|")]
-        if len(parts) != 4:
+        if len(parts) not in (4, 5):
             log(f"  destino mal formado (ignorado): {chunk!r}")
             continue
-        chat_part, cuando, valor, tf = parts
-        # chat_part puede ser "chat_id" o "chat_id/tema" (tema = message_thread_id)
+        # formato: chat_id[/tema]|cuando|valor|tf[|par1,par2,...]
+        chat_part, cuando, valor, tf = parts[0], parts[1], parts[2], parts[3]
+        pares = parts[4] if len(parts) >= 5 else "btc"
+        pares = [p.strip().lower() for p in pares.split(",") if p.strip()]
         if "/" in chat_part:
             chat_id, thread = chat_part.split("/", 1)
             thread = thread.strip()
         else:
             chat_id, thread = chat_part, None
         dest.append({"chat_id": chat_id.strip(), "thread": thread,
-                     "cuando": cuando.lower(), "valor": valor, "tf": tf, "last": None})
+                     "cuando": cuando.lower(), "valor": valor, "tf": tf,
+                     "pares": pares, "last": None})
     return dest
 
 
@@ -310,7 +313,7 @@ def main():
     log(f"Arrancando. TZ={TZ_NAME}. Destinos:")
     for d in destinos:
         tema = f" (tema {d['thread']})" if d.get('thread') else ""
-        log(f"  {d['chat_id']}{tema} | {d['cuando']} {d['valor']} | {d['tf']}")
+        log(f"  {d['chat_id']}{tema} | {d['cuando']} {d['valor']} | {d['tf']} | pares: {','.join(d.get('pares',['btc']))}")
 
     os.makedirs(PROFILE_DIR, exist_ok=True)
 
@@ -385,19 +388,24 @@ def main():
             for d in destinos:
                 if not is_due(d, now):
                     continue
-                caption = f"BTC/USDT · {d['tf']} · Liquidaciones (Trading Different)"
                 try:
                     if not is_logged_in(page):
                         login(page)
-                    path = capture(page, d["tf"])
-                    send_photo(d["chat_id"], path, caption, d.get("thread"))
+                    for par in d.get("pares", ["btc"]):
+                        url = MAPA_PARES.get(par)
+                        if not url:
+                            log(f"  aviso: par '{par}' no esta en MAPA_PARES, lo salto")
+                            continue
+                        cap = f"{par.upper()}/USDT · {d['tf']} · Liquidaciones (Trading Different)"
+                        path = capture(page, d["tf"], url)
+                        send_photo(d["chat_id"], path, cap, d.get("thread"))
+                        log(f"  -> Enviado {par.upper()} a {d['chat_id']} ({d['tf']}) OK")
+                        time.sleep(3)
                     d["last"] = now
                     fail_streak = 0
-                    log(f"  -> Enviado a {d['chat_id']} ({d['tf']}) OK")
                 except Exception as e:
                     log(f"X error enviando a {d['chat_id']}:", e)
                     if _is_crash(e):
-                        # reinicia y reintenta una vez para no perder el envío
                         try:
                             try:
                                 ctx.close()
@@ -405,11 +413,8 @@ def main():
                                 pass
                             ctx, page = make_ctx(p)
                             login(page)
-                            path = capture(page, d["tf"])
-                            send_photo(d["chat_id"], path, caption, d.get("thread"))
-                            d["last"] = now
                             fail_streak = 0
-                            log(f"  -> Enviado a {d['chat_id']} ({d['tf']}) OK (tras reinicio)")
+                            log("  navegador reiniciado tras crash en envio programado")
                         except Exception as e2:
                             fail_streak += 1
                             log("  X sigue fallando tras reinicio:", e2)
