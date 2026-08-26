@@ -44,6 +44,7 @@ PRICE_COMPRESS = int(os.environ.get("PRICE_COMPRESS", "6"))
 WM_TEXT    = os.environ.get("WM_TEXT", "@comunidadfxjotaruiz")
 WM_OPACITY = int(os.environ.get("WM_OPACITY", "55"))     # 0-255 (más = más visible)
 WM_LOGO    = os.environ.get("WM_LOGO", "logo-academy.png")  # archivo del logo en el repo (opcional)
+WM_SCALE   = float(os.environ.get("WM_SCALE", "1.6"))    # tamaño del texto (1.0 = normal, más = más grande)
 # --- Comando /mapa bajo demanda ---
 MAPA_ENABLE     = os.environ.get("MAPA_ENABLE", "1") == "1"
 MAPA_COMMAND    = os.environ.get("MAPA_COMMAND", "/mapa").strip()
@@ -294,7 +295,7 @@ def apply_watermark(path):
         overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
         # tile de texto, rotado 30º
-        font = _wm_font(max(18, W // 45))
+        font = _wm_font(int(max(18, W // 45) * WM_SCALE))
         d = ImageDraw.Draw(overlay)
         bbox = d.textbbox((0, 0), WM_TEXT, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
