@@ -14,6 +14,7 @@ except Exception:
     ZoneInfo = None
 
 import requests
+from PIL import Image, ImageDraw, ImageFont
 from playwright.sync_api import sync_playwright
 
 # ---------- Config ----------
@@ -39,6 +40,10 @@ VP_HEIGHT    = int(os.environ.get("VP_HEIGHT", "760"))
 # Compresión del eje de PRECIO: arrastra la escala de la derecha para ver más rango arriba/abajo.
 # Nº de "pasos" de arrastre (más = más rango de precio). 0 = no comprime.
 PRICE_COMPRESS = int(os.environ.get("PRICE_COMPRESS", "6"))
+# --- Marca de agua (mosaico texto + logo) ---
+WM_TEXT    = os.environ.get("WM_TEXT", "@comunidadfxjotaruiz")
+WM_OPACITY = int(os.environ.get("WM_OPACITY", "55"))     # 0-255 (más = más visible)
+WM_LOGO    = os.environ.get("WM_LOGO", "logo-academy.png")  # archivo del logo en el repo (opcional)
 # --- Comando /mapa bajo demanda ---
 MAPA_ENABLE     = os.environ.get("MAPA_ENABLE", "1") == "1"
 MAPA_COMMAND    = os.environ.get("MAPA_COMMAND", "/mapa").strip()
@@ -271,6 +276,64 @@ def compress_price(page):
         log(f"  aviso: no pude comprimir el eje de precio ({e})")
 
 
+def _wm_font(size):
+    for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def apply_watermark(path):
+    """Estampa texto (y logo si existe) en mosaico por toda la imagen."""
+    try:
+        base = Image.open(path).convert("RGBA")
+        W, H = base.size
+        overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+        # tile de texto, rotado 30º
+        font = _wm_font(max(18, W // 45))
+        d = ImageDraw.Draw(overlay)
+        bbox = d.textbbox((0, 0), WM_TEXT, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        tile = Image.new("RGBA", (tw + 40, th + 40), (0, 0, 0, 0))
+        ImageDraw.Draw(tile).text((20, 20), WM_TEXT, font=font, fill=(255, 255, 255, WM_OPACITY))
+        tile = tile.rotate(30, expand=True)
+        stepx, stepy = tile.width + 60, tile.height + 50
+        row = 0; y = -tile.height
+        while y < H + tile.height:
+            x = -tile.width + (row % 2) * (stepx // 2)
+            while x < W + tile.width:
+                overlay.alpha_composite(tile, (int(x), int(y)))
+                x += stepx
+            y += stepy; row += 1
+
+        # logo en mosaico (opcional)
+        if WM_LOGO and os.path.exists(WM_LOGO):
+            try:
+                logo = Image.open(WM_LOGO).convert("RGBA")
+                logo.thumbnail((max(60, W // 14), max(60, W // 14)))
+                a = logo.split()[3].point(lambda p: min(p, WM_OPACITY + 20))
+                logo.putalpha(a)
+                row = 0; y = stepy // 2
+                while y < H:
+                    x = stepx // 2 + (row % 2) * (stepx // 2)
+                    while x < W:
+                        overlay.alpha_composite(logo, (int(x), int(y)))
+                        x += stepx
+                    y += stepy; row += 1
+            except Exception as e:
+                log("  aviso: no pude estampar el logo:", e)
+
+        Image.alpha_composite(base, overlay).convert("RGB").save(path, "PNG")
+        log("  marca de agua aplicada")
+    except Exception as e:
+        log("  aviso: no pude poner marca de agua:", e)
+    return path
+
+
 def capture(page, tf, url=None):
     log("Abriendo el gráfico…")
     page.goto(url or TD_CHART_URL, wait_until="domcontentloaded", timeout=60000)
@@ -284,6 +347,7 @@ def capture(page, tf, url=None):
         cam.click()
     out = os.path.join(tempfile.gettempdir(), "td_btc.png")
     dl_info.value.save_as(out)
+    apply_watermark(out)
     return out
 
 
